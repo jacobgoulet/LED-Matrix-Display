@@ -1,0 +1,3 @@
+Raspberry Pi OS download: https://www.raspberrypi.com/software/
+Import for visualization: Pygame
+Library import command for actual LED: sudo pip3 install rpi-ws281x adafruit-circuitpython-neopixel
