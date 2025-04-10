@@ -1,105 +1,95 @@
 import time
 from datetime import datetime
+import board
+import neopixel
 import requests
-from rpi_ws281x import PixelStrip, Color
 from PIL import Image, ImageDraw, ImageFont
 
-#confuguration for the led
+#=== LED MATRIX CONFIG ===
 LED_ROWS = 32
-LED_COLS = 384  #24 panels wide * 16px
+LED_COLS = 384
 LED_COUNT = LED_ROWS * LED_COLS
-LED_PIN = 18
-BRIGHTNESS = 40
+LED_PIN = board.D18  #GPIO18
+BRIGHTNESS = 0.2
 
-strip = PixelStrip(LED_COUNT, LED_PIN, 800000, 10, False, BRIGHTNESS, 0)
-strip.begin() #basically initializes communication with the LED matrices
+#initialize NeoPixel strip
+pixels = neopixel.NeoPixel(
+    LED_PIN, LED_COUNT, brightness=BRIGHTNESS, auto_write=False, pixel_order=neopixel.GRB
+)
 
-#text, adjustable
-font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-font_main = ImageFont.truetype(font_path, 16)
-TEXT_COLOR = (0, 0, 255)
-ANNOUNCEMENT_COLOR = (255, 255, 0)
-
-#weather API import
+# === WEATHER API CONFIG ===
 API_KEY = "6592c6ba769a4b934b6d309f912c7a8d"
 CITY = "State College"
 URL = f"http://api.openweathermap.org/data/2.5/weather?q={CITY}&appid={API_KEY}&units=imperial"
+
+#=== FONT SETTINGS ===
+FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+font_main = ImageFont.truetype(FONT_PATH, 16)
+TEXT_COLOR = (0, 0, 255)
+ANNOUNCEMENT_COLOR = (255, 255, 0)
 
 def get_weather():
     try:
         response = requests.get(URL)
         data = response.json()
-        temp = round(data["main"]["temp"]) #retrieves the current temperature
+        temp = round(data["main"]["temp"])
         condition = data["weather"][0]["main"]
-        return f"{temp}°F {condition}" #format for display purposes
+        return f"{temp}°F {condition}"
     except:
         return "Weather Error"
 
-#LED MAPPING FUNCTION (Zigzag layout)
+#zigzag layout function
 def get_led_index(x, y):
-    y = LED_ROWS - 1 - y  #flip vertical if the bottom row is 0
-    return y * LED_COLS + (x if y % 2 == 0 else (LED_COLS - 1 - x)) #even rows go left to right, odd rows go right to left
+    y = LED_ROWS - 1 - y
+    return y * LED_COLS + (x if y % 2 == 0 else (LED_COLS - 1 - x))
 
-
-def generate_time_weather_image():
-    time_str = datetime.now().strftime("%I:%M %p")
-    weather_str = get_weather()
-    combined = f"{time_str}    {weather_str}" #combine both of the strings
-    text_width, text_height = font_main.getsize(combined)
-
-    img_width = text_width + LED_COLS #measure the width of the string then
-    #we create a wide image to scroll across
-    img = Image.new("RGB", (img_width + LED_COLS, LED_ROWS), (0, 0, 0))
+def draw_text_image(text, color):
+    bbox = font_main.getbbox(text)
+    width = bbox[2] - bbox[0]
+    height = bbox[3] - bbox[1]
+    img_width = width + LED_COLS + 100
+    img = Image.new("RGB", (img_width, LED_ROWS), (0, 0, 0))
     draw = ImageDraw.Draw(img)
-
-    y = (LED_ROWS - text_height) // 2 #center the text
-    draw.text((LED_COLS, y), combined, font=font_main, fill=TEXT_COLOR)
-    draw.text((LED_COLS + text_width + 50, y), combined, font=font_main, fill=TEXT_COLOR)
+    y = (LED_ROWS - height) // 2
+    draw.text((LED_COLS, y), text, font=font_main, fill=color)
     return img
 
-
-announcement_text = "capstone"
-
-def generate_announcement_image(text):
-    #same idea as weather and time
-    font_announcement = ImageFont.truetype(font_path, 14)
-    text_width, text_height = font_announcement.getsize(text)
-
-    img_width = text_width + LED_COLS
-    img = Image.new("RGB", (img_width + LED_COLS, LED_ROWS), (0, 0, 0))
-    draw = ImageDraw.Draw(img)
-
-    y = (LED_ROWS - text_height) // 2
-    draw.text((LED_COLS, y), text, font=font_announcement, fill=ANNOUNCEMENT_COLOR)
-    draw.text((LED_COLS + text_width + 50, y), text, font=font_announcement, fill=ANNOUNCEMENT_COLOR)
-    return img
-
-
-def scroll_text(image, speed=0.03):
-    offset = 0 #starting at leftmost part of the image
-    width = image.width
-    while offset < width: #scroll until a full loop is complete
-        frame = Image.new("RGB", (LED_COLS, LED_ROWS), (0, 0, 0))
-        for x in range(LED_COLS): #fill the frame from the image by copying pixels with wrapping
-            for y in range(LED_ROWS):
-                src_x = (offset + x) % width #wrap around
-                r, g, b = image.getpixel((src_x, y))
-                frame.putpixel((x, y), (r, g, b))
-        #convert image to LED colors
+def scroll_image(img, speed=0.03):
+    width = img.width
+    for offset in range(width):
+        frame = img.crop((offset, 0, offset + LED_COLS, LED_ROWS))
         for y in range(LED_ROWS):
             for x in range(LED_COLS):
                 r, g, b = frame.getpixel((x, y))
-                strip.setPixelColor(get_led_index(x, y), Color(r, g, b))
-        strip.show() #this basically pushes updates to led
-        offset = (offset + 1) % width #move the scroll position
+                pixels[get_led_index(x, y)] = (r, g, b)
+        pixels.show()
         time.sleep(speed)
 
+#=== MAIN LOOP ===
+ANNOUNCEMENT_TEXT = "Capstone LED Matrix Live Demo Week!"
+STATIC_DURATION = 30
 
 while True:
-    #time and weather scroll
-    time_image = generate_time_weather_image()
-    scroll_text(time_image)
+    #1.show static time + weather for 30 seconds
+    combined = f"{datetime.now().strftime('%I:%M %p')}    {get_weather()}"
+    bbox = font_main.getbbox(combined)
+    text_width = bbox[2] - bbox[0]
+    spacing = (LED_COLS - 3 * text_width) // 4
+    img = Image.new("RGB", (LED_COLS, LED_ROWS), (0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    y = (LED_ROWS - (bbox[3] - bbox[1])) // 2
+    for i in range(3):
+        x = spacing + i * (text_width + spacing)
+        draw.text((x, y), combined, font=font_main, fill=TEXT_COLOR)
+    for y in range(LED_ROWS):
+        for x in range(LED_COLS):
+            r, g, b = img.getpixel((x, y))
+            pixels[get_led_index(x, y)] = (r, g, b)
+    pixels.show()
+    time.sleep(STATIC_DURATION)
 
-    #announcement scroll
-    announcement_image = generate_announcement_image(announcement_text)
-    scroll_text(announcement_image)
+    #2. scroll time + weather
+    scroll_image(draw_text_image(combined, TEXT_COLOR))
+
+    #3. scroll announcement
+    scroll_image(draw_text_image(ANNOUNCEMENT_TEXT, ANNOUNCEMENT_COLOR), speed=0.05)
