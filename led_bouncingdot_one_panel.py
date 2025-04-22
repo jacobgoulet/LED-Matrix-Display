@@ -1,4 +1,6 @@
 import time
+import sys
+sys.path.append('lib')
 from rpi_ws281x import PixelStrip, Color
 
 # === SINGLE PANEL CONFIG ===
