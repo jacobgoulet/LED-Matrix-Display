@@ -1,106 +1,139 @@
 import time
 from datetime import datetime
 import requests
+from rpi_ws281x import PixelStrip, Color
 from PIL import Image, ImageDraw, ImageFont
-import board
-import neopixel
 
-#=== LED MATRIX CONFIGURATION ===
+#=== LED MATRIX CONFIG ===
 LED_ROWS = 32
 LED_COLS = 384
 LED_COUNT = LED_ROWS * LED_COLS
-LED_PIN = board.D18
-BRIGHTNESS = 0.2
+LED_PIN = 18  # GPIO18
+BRIGHTNESS = 40
 
-#Initialize the NeoPixel matrix
-pixels = neopixel.NeoPixel(
-    LED_PIN, LED_COUNT, brightness=BRIGHTNESS, auto_write=False, pixel_order=neopixel.GRB
-)
+#=== Initialize LED Strip ===
+strip = PixelStrip(LED_COUNT, LED_PIN, 800000, 10, False, BRIGHTNESS)
+strip.begin()
+
+#=== FONT SETUP ===
+FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+font_main = ImageFont.truetype(FONT_PATH, 16)
+TEXT_COLOR = (0, 0, 255)
+ANNOUNCEMENT_COLOR = (255, 255, 0)
 
 #=== WEATHER API CONFIG ===
 API_KEY = "6592c6ba769a4b934b6d309f912c7a8d"
 CITY = "State College"
 URL = f"http://api.openweathermap.org/data/2.5/weather?q={CITY}&appid={API_KEY}&units=imperial"
 
-#=== FONTS AND COLORS ===
-FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-font_main = ImageFont.truetype(FONT_PATH, 16)
-TEXT_COLOR = (0, 0, 255)
-ANNOUNCEMENT_COLOR = (255, 255, 0)
-
-#=== DISPLAY FUNCTIONS ===
-def get_weather_data():
+def get_weather():
     try:
         response = requests.get(URL)
         data = response.json()
         temp = round(data["main"]["temp"])
-        condition = data["weather"][0]["main"].lower()
-        return temp, condition
+        condition = data["weather"][0]["main"]
+        return f"{temp}°F {condition}", condition
     except:
-        return None, "weather error"
+        return "Weather Error", "Error"
 
-def draw_weather_icon(draw, x, y, condition):
-    if "clear" in condition:
-        draw.ellipse((x, y, x+12, y+12), fill=(255, 255, 0))
-    elif "cloud" in condition:
-        draw.ellipse((x, y+2, x+10, y+10), fill=(200, 200, 200))
-        draw.ellipse((x+6, y, x+16, y+10), fill=(200, 200, 200))
-    elif "rain" in condition:
-        draw.ellipse((x, y+2, x+10, y+10), fill=(150, 150, 150))
-        draw.line((x+3, y+11, x+3, y+15), fill=(0, 0, 255))
-        draw.line((x+7, y+11, x+7, y+15), fill=(0, 0, 255))
-    elif "snow" in condition:
-        draw.text((x, y), "*", font=font_main, fill=(255, 255, 255))
-    elif "thunder" in condition:
-        draw.ellipse((x, y+2, x+10, y+10), fill=(100, 100, 100))
-        draw.line((x+6, y+10, x+4, y+14), fill=(255, 255, 0), width=2)
-    elif "fog" in condition or "mist" in condition:
-        draw.line((x, y+4, x+14, y+4), fill=(180, 180, 180))
-        draw.line((x, y+8, x+14, y+8), fill=(180, 180, 180))
-
+#=== PANEL MAPPING (Z pattern starting top-left) ===
 def get_led_index(x, y):
-    y = LED_ROWS - 1 - y
-    return y * LED_COLS + (x if y % 2 == 0 else (LED_COLS - 1 - x))
+    panel_h = 16
+    panel_w = 16
+    panel_column = x // panel_h
+    panel_row = y // panel_w
+    panel_x = x % panel_h
+    panel_y = y % panel_w
+    if panel_column % 2 == 0:
+        led_index = (panel_row * panel_h + panel_x) * panel_w + panel_y
+    else:
+        led_index = (panel_row * panel_h + (panel_w - 1 - panel_x)) * panel_w + panel_y
 
-def render_image_to_pixels(image):
-    for y in range(LED_ROWS):
-        for x in range(LED_COLS):
-            r, g, b = image.getpixel((x, y))
-            pixels[get_led_index(x, y)] = (r, g, b)
-    pixels.show()
+    return led_index + (panel_column * panel_h * panel_w) + (panel_row * panel_w * panel_h)
 
-def scroll_image(image, speed=0.03):
-    width = image.width
-    for offset in range(width):
-        frame = image.crop((offset, 0, offset + LED_COLS, LED_ROWS))
-        render_image_to_pixels(frame)
+#=== WEATHER ICON DRAWING ===
+def draw_weather_icon(condition):
+    icon = Image.new("RGB", (32, 32), (0, 0, 0))
+    draw = ImageDraw.Draw(icon)
+    if condition == "Clear":
+        draw.ellipse((8, 8, 24, 24), fill=(255, 255, 0))  #sun
+    elif condition == "Clouds":
+        draw.ellipse((10, 12, 22, 24), fill=(150, 150, 150))
+        draw.ellipse((14, 8, 26, 20), fill=(150, 150, 150))
+    elif condition == "Rain":
+        draw.ellipse((10, 12, 22, 24), fill=(150, 150, 150))
+        draw.ellipse((14, 8, 26, 20), fill=(150, 150, 150))
+        draw.rectangle((12, 26, 14, 30), fill=(0, 100, 255))
+        draw.rectangle((18, 26, 20, 30), fill=(0, 100, 255))
+    elif condition == "Snow":
+        draw.ellipse((10, 12, 22, 24), fill=(150, 150, 150))
+        draw.ellipse((14, 8, 26, 20), fill=(150, 150, 150))
+        draw.text((13, 26), "*", font=font_main, fill=(255, 255, 255))
+    return icon
+
+#=== DRAWING FUNCTIONS ===
+def draw_text_image(text, color, icon=None):
+    bbox = font_main.getbbox(text)
+    width = bbox[2] - bbox[0]
+    height = bbox[3] - bbox[1]
+    img_width = width + LED_COLS + 100 + (icon.width if icon else 0)
+    img = Image.new("RGB", (img_width, LED_ROWS), (0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    y = (LED_ROWS - height) // 2
+    draw.text((LED_COLS + (icon.width if icon else 0), y), text, font=font_main, fill=color)
+    if icon:
+        img.paste(icon, (LED_COLS, 0))
+    return img
+
+def scroll_image(img, speed=0.03):
+    width = img.width
+    for offset in range(width - LED_COLS):
+        frame = img.crop((offset, 0, offset + LED_COLS, LED_ROWS))
+        for y in range(LED_ROWS):
+            for x in range(LED_COLS):
+                r, g, b = frame.getpixel((x, y))
+                strip.setPixelColor(get_led_index(x, y), Color(r, g, b))
+        strip.show()
         time.sleep(speed)
 
-#=== MAIN LOOP ===
-ANNOUNCEMENT_TEXT = "Capstone LED Matrix Live Demo!"
-STATIC_DURATION = 30
-
-while True:
-    #Static display of time and weather
-    temp, condition = get_weather_data()
-    time_str = datetime.now().strftime("%I:%M %p")
-    label = f"{time_str}    {temp}°F {condition.capitalize()}"
-    bbox = font_main.getbbox(label)
+def show_static_text(text, color, duration=30):
+    bbox = font_main.getbbox(text)
     text_width = bbox[2] - bbox[0]
     spacing = (LED_COLS - 3 * text_width) // 4
-
     img = Image.new("RGB", (LED_COLS, LED_ROWS), (0, 0, 0))
     draw = ImageDraw.Draw(img)
-    draw_weather_icon(draw, 5, 10, condition)
     y = (LED_ROWS - (bbox[3] - bbox[1])) // 2
     for i in range(3):
         x = spacing + i * (text_width + spacing)
-        draw.text((x, y), label, font=font_main, fill=TEXT_COLOR)
-    render_image_to_pixels(img)
-    time.sleep(STATIC_DURATION)
+        draw.text((x, y), text, font=font_main, fill=color)
+    for y in range(LED_ROWS):
+        for x in range(LED_COLS):
+            r, g, b = img.getpixel((x, y))
+            strip.setPixelColor(get_led_index(x, y), Color(r, g, b))
+    strip.show()
+    time.sleep(duration)
 
-    #Scroll time + weather
-    scroll_image(draw_text_image(label, TEXT_COLOR))
+#=== ANNOUNCEMENTS ===
+ANNOUNCEMENTS = [
+    "Jacob",
+    "Ben",
+    "Sami",
+    "Mason",
+    "Stevie"
+]
 
-    #Scroll announcements
-    scroll_image(draw_text_image(ANNOUNCEMENT_TEXT, ANNOUNCEMENT_COLOR), speed=0.05)
+#=== MAIN LOOP ===
+while True:
+    weather_str, condition = get_weather()
+    combined = f"{datetime.now().strftime('%I:%M %p')}    {weather_str}"
+    icon = draw_weather_icon(condition)
+
+    #1. Static display
+    show_static_text(combined, TEXT_COLOR, duration=30)
+
+    #2. Scroll time + weather
+    scroll_image(draw_text_image(combined, TEXT_COLOR, icon), speed=0.02)
+
+    #3. Scroll all announcements
+    for msg in ANNOUNCEMENTS:
+        scroll_image(draw_text_image(msg, ANNOUNCEMENT_COLOR), speed=0.05)
